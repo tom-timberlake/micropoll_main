@@ -1,5 +1,5 @@
 # Reproducible R code for the manuscript entitled:  
-**‘Pollination deficits limit the health and wealth of impoverished communities’**
+**‘How pollinators support the health and wealth of vulnerable communities’**
 
 **Author:** Thomas P. Timberlake  
 **Last updated:** 17/10/2025  

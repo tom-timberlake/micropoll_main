@@ -133,7 +133,7 @@ intake_pollination_data <- merge(x=daily_intakes, y=pollen_proportion_summary_su
 #For any ingredients where insect interactions were not recorded, we enter the text 'Other' into the insect ID columns and enter 1 into prop_pollen 
 #This ensures that when we simulate pollinator declines, pollinator-dependent ingredients without interaction info are not ignored and will also decline
 
-intake_pollination_data <- intake_pollination_data %>%
+intake_pollination_data_clean <- intake_pollination_data %>%
   dplyr::mutate(is_missing_taxa = is.na(pollinator_taxa),  # Temporary helper column
                 pollinator_taxa = if_else(is_missing_taxa, "Other", pollinator_taxa),
                 insect_order = if_else(is_missing_taxa, "Other", insect_order),
@@ -152,8 +152,8 @@ intake_pollination_data <- intake_pollination_data %>%
 #This is one of our model assumptions - that only locally produced foods decline, and imported foods remain unchanged
 #This setting can be changed by removing this line
 
-#intake_pollination_data <- intake_pollination_data %>%
-  #dplyr::mutate(final_poll_dependence = if_else(local_imported == "import",  0, final_poll_dependence))
+intake_pollination_data_clean <- intake_pollination_data_clean %>%
+  dplyr::mutate(final_poll_dependence = if_else(local_imported == "import",  0, final_poll_dependence))
 
 
 #######################################
@@ -162,7 +162,7 @@ intake_pollination_data <- intake_pollination_data %>%
 
 #Calculate intake of each nutrient (from each ingredient) that is attributable to each insect taxon
 # Formula for this metric = Intake of nutrient X * Pollinator dependence of crop * Proportion pollen transport by given insect
-intake_pollination_data <- intake_pollination_data %>%
+intake_pollination_data_clean <- intake_pollination_data_clean %>%
   dplyr::mutate(int_Energy_poll = (int_Energy_Kcal * final_poll_dependence) * proportion_pollen,
                 int_Fat_poll = (int_Fat_g * final_poll_dependence) * proportion_pollen,
                 int_Protein_poll = (int_Protein_g * final_poll_dependence) * proportion_pollen,
@@ -192,7 +192,7 @@ decline_rates <- c(1.00, 0.33)  # 100% and 33%
 # ----------------------------
 # Helper: run one decline rate
 # ----------------------------
-run_single_decline <- function(poll_decline, n_sim, intake_pollination_data) {
+run_single_decline <- function(poll_decline, n_sim, intake_pollination_data_clean) {
   daily_list <- vector("list", n_sim)  # store only day-level NEW intakes
   
   for (sim in seq_len(n_sim)) {
@@ -202,16 +202,16 @@ run_single_decline <- function(poll_decline, n_sim, intake_pollination_data) {
     
     # 1) Per-species random decline around mean = poll_decline
     otu_lookup <- data.frame(
-      insect_OTU = unique(intake_pollination_data$insect_OTU),
-      species_decline = pmin(1, pmax(0, stats::rnorm(length(unique(intake_pollination_data$insect_OTU)),
+      insect_OTU = unique(intake_pollination_data_clean$insect_OTU),
+      species_decline = pmin(1, pmax(0, stats::rnorm(length(unique(intake_pollination_data_clean$insect_OTU)),
                                                      mean = poll_decline, sd = 0.2)))
     )
     
     # 2) Merge to main data
-    intake_pollination_data_decl <- dplyr::left_join(intake_pollination_data, otu_lookup, by = "insect_OTU")
+    intake_pollination_data_clean_decl <- dplyr::left_join(intake_pollination_data_clean, otu_lookup, by = "insect_OTU")
     
     # 3) Apply decline to pollinator-dependent portions (and pollen)
-    poll_change_by_sp <- intake_pollination_data_decl %>%
+    poll_change_by_sp <- intake_pollination_data_clean_decl %>%
       dplyr::mutate(
         int_Energy_poll_change       = int_Energy_poll       * species_decline,
         int_Fat_poll_change          = int_Fat_poll          * species_decline,
@@ -315,7 +315,7 @@ run_single_decline <- function(poll_decline, n_sim, intake_pollination_data) {
 
 # ---- Run both scenarios and save ----
 # (ensure purrr/dplyr/readr are loaded or prefix as below)
-results <- purrr::map(decline_rates, ~run_single_decline(.x, n_simulations, intake_pollination_data))
+results <- purrr::map(decline_rates, ~run_single_decline(.x, n_simulations, intake_pollination_data_clean))
 names(results) <- paste0("decl_", gsub("\\.", "", sprintf("%.2f", decline_rates)))
 
 new_intakes_all <- dplyr::bind_rows(lapply(results, `[[`, "daily"))
@@ -802,16 +802,25 @@ write.csv(poll_change_summary_wide, "output_data/nutrients_income_prop_change_fr
 data_to_plot <- nutrition_and_economic[nutrition_and_economic$scenario %in% c("no_poll", "poll_incr", "poll_decl"), ] #Define which scenarios to plot
 data_to_plot <- data_to_plot[data_to_plot$nutrient %in% c("Calcium", "Iron", "VitaminC", "FolateTotal", "VitARE", "VitaminE", "Farming income"), ] #Define which nutrients to plot
 
-#Change label names
+# Change label names and append " intake"
 data_to_plot <- data_to_plot %>%
-  mutate(nutrient = case_when(nutrient == "VitaminC" ~ "Vitamin C",
-                              nutrient == "FolateTotal" ~ "Folate",
-                              nutrient == "VitARE" ~ "Vitamin A",
-                              nutrient == "VitaminE" ~ "Vitamin E",
-                              TRUE ~ nutrient))
-
+  dplyr::mutate(nutrient = case_when(
+      nutrient == "Calcium"      ~ "Calcium intake",
+      nutrient == "Iron"         ~ "Iron intake",
+      nutrient == "VitaminC"     ~ "Vitamin C intake",
+      nutrient == "FolateTotal"  ~ "Folate intake",
+      nutrient == "VitARE"       ~ "Vitamin A intake",
+      nutrient == "VitaminE"     ~ "Vitamin E intake",
+      TRUE ~ nutrient))
+    
 #Define order of nutrients to plot
-nutrient_order <- c( "Vitamin A","Folate", "Vitamin E", "Vitamin C" ,  "Calcium", "Iron","Farming income")
+nutrient_order <- c( "Vitamin A intake",
+                     "Folate intake",
+                     "Vitamin C intake",
+                     "Calcium intake",
+                     "Iron intake",
+                     "Vitamin E intake",
+                     "Farming income")
 
 # Convert 'nutrient' to a factor with the specified order
 data_to_plot$nutrient <- factor(data_to_plot$nutrient, levels = nutrient_order)

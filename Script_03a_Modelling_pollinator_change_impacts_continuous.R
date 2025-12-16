@@ -80,7 +80,7 @@ names(pollen_proportion_summary_subset)
 #Subset data to columns of interest
 intake_data_subset <- intake_data %>%
   select(formid,	resp_id,	date,	resp_cat, village_code,  ingredient_code, ingredient_name,	ingredient_grams_consumed,	
-         sci_name,	final_poll_dependence,	
+         sci_name,local_imported,	final_poll_dependence,	
          int_Energy_Kcal,	int_Fat_g,	int_Protein_g,	
          int_Calcium_mg,	int_Iron_mg,	int_Zinc_mg,	int_VitaminC_mg,	int_FolateTotal_µg, int_VitARE_µg,	int_VitaminE_mg,
          int_ThiaminB1_mg,	int_RiboflavinB2_mg, int_NiacinB3_mg,	int_VitaminB6pyridoxine_mg,	int_VitaminB12_µg)
@@ -88,7 +88,7 @@ intake_data_subset <- intake_data %>%
 #Group by relevant categories and sum intakes of each person during each recall event
 daily_intakes <- intake_data_subset %>%
   group_by(formid,resp_id, date, resp_cat, village_code, 
-           sci_name,final_poll_dependence) %>%
+           sci_name,local_imported, final_poll_dependence) %>%
   summarise(ingredient_grams_consumed = sum(ingredient_grams_consumed, na.rm = TRUE),
             int_Energy_Kcal = sum(int_Energy_Kcal, na.rm = TRUE),
             int_Fat_g = sum(int_Fat_g, na.rm = TRUE),
@@ -129,9 +129,22 @@ intake_pollination_data <- intake_pollination_data %>%
   select(-is_missing_taxa)  # Remove helper column
   
 
+#######################################################################
+#######  Exclude imported ingredients from the decline simulations     #######
+#######################################################################
+
+#List imported ingredients as non-pollinator dependent so they do not decline along with the other local ingredients. 
+#This is one of our model assumptions - that only locally produced foods decline, and imported foods remain unchanged
+#This setting can be changed by removing this line
+
+intake_pollination_data_clean <- intake_pollination_data %>%
+  dplyr::mutate(final_poll_dependence = if_else(local_imported == "import",  0, final_poll_dependence))
+
+
+
 #Calculate intake of each nutrient (from each ingredient) that is attributable to each insect taxon
 # Formula for this metric = Intake of nutrient X * Pollinator dependence of crop * Proportion pollen transport by given insect
-intake_pollination_data <- intake_pollination_data %>%
+intake_pollination_data_clean <- intake_pollination_data_clean %>%
   dplyr::mutate(int_Energy_poll = (int_Energy_Kcal * final_poll_dependence) * proportion_pollen,
                 int_Fat_poll = (int_Fat_g * final_poll_dependence) * proportion_pollen,
                 int_Protein_poll = (int_Protein_g * final_poll_dependence) * proportion_pollen,
@@ -188,15 +201,15 @@ for (sim in 1:n_simulations) {
                 sim, poll_decline, format(Sys.time(), "%H:%M:%S")))
     
     #Assign each pollinator taxa a random decline rate based on a mean of the overall poll_decline value and an sd of 0.2
-    otu_lookup <- data.frame(insect_OTU = unique(intake_pollination_data$insect_OTU),
-                             species_decline = rnorm(length(unique(intake_pollination_data$insect_OTU)), mean = poll_decline, sd = 0.2))
+    otu_lookup <- data.frame(insect_OTU = unique(intake_pollination_data_clean$insect_OTU),
+                             species_decline = rnorm(length(unique(intake_pollination_data_clean$insect_OTU)), mean = poll_decline, sd = 0.2))
     
     # Clip to [0, 1]
     otu_lookup$species_decline[otu_lookup$species_decline < 0] <- 0
     otu_lookup$species_decline[otu_lookup$species_decline > 1] <- 1
     
     # Merge decline rates back to main dataframe
-    intake_pollination_data_decl <- intake_pollination_data %>%
+    intake_pollination_data_decl <- intake_pollination_data_clean %>%
       left_join(otu_lookup, by = "insect_OTU")
     
     #Calculate the amount that intake of each nutrient for each food item would decline based on each pollinators specific rate of decline
@@ -431,7 +444,7 @@ summary_stats_full <- summary_stats_pop %>%
   bind_rows(baseline_rows)
   
 # List of nutrients you want to plot
-nutrients_to_plot <- c("VitA",  "VitE", "VitC","Folate", "Calcium", "Iron") 
+nutrients_to_plot <- c("VitA", "Folate", "VitC", "Calcium", "Iron", "VitE") 
 
 # Custom labels
 nutrient_labels <- c(
@@ -625,7 +638,7 @@ ggsave(plot=poll_decline_by_village, filename="plots/Poll_decline_village_level.
 ############################################################################################
 
 # Get all unique OTUs
-otus <- unique(intake_pollination_data$insect_OTU)
+otus <- unique(intake_pollination_data_clean$insect_OTU)
 
 # Initialize results storage
 species_decline_results_list <- list()  # for population-level
@@ -644,7 +657,7 @@ for (otu in otus) {
               otu, format(Sys.time(), "%H:%M:%S")))
   
   # Set proportion_pollen to zero for that OTU
-  intake_pollination_data_decl <- intake_pollination_data %>%
+  intake_pollination_data_decl <- intake_pollination_data_clean %>%
     mutate(species_decline = if_else(insect_OTU == otu, 1, 0))
   
 glimpse(intake_pollination_data_decl)

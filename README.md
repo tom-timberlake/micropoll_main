@@ -147,18 +147,21 @@ Scenario-specific datasets, nutrient and income change summaries, and plots.
 ### **Script 4: Calculating Crop–Pollinator Network Metrics**
 
 **Purpose:**  
-Quantify network metrics for pollinator species and assess their ability to predict nutritional importance.
+Quantify key species-level crop–pollinator network roles and pollinator abundance, and assess their ability to predict nutritional importance.
 
 **Key Steps:**  
-- Import plant–pollinator visitation data and species-removal results (Script 3A).  
-- Construct crop–pollinator interaction matrices and calculate metrics (degree, nested rank, closeness, effective partners).  
-- Merge metrics with nutrient-decline results.  
-- Fit linear models and rank by AIC to identify best predictors.  
-- Export model summaries and generate diagnostic and relationship plots.
+- Import crop–pollinator visitation data and species-removal (nutritional decline) results (Script 3A).  
+- Filter interactions to crop species and identified pollinator OTUs, and construct a quantitative crop × pollinator interaction matrix.  
+- Calculate species-level network metrics for pollinators (degree, Blüthgen’s *d* specialisation, species strength) using the **bipartite** package.  
+- Merge network metrics with pollinator abundance and nutritional impact estimates for each pollinator OTU.  
+- Summarise nutritional importance as the combined proportional intake decline across six pollinator-dependent nutrients.  
+- Fit linear models (abundance-only, abundance plus individual metrics, abundance plus all metrics) and rank models by AIC.  
+- Export model comparison tables and generate correlation and diagnostic plots.
 
 **Outputs:**  
-- `output_data/Species_network_metrics_model_summary.csv`  
-- `plots/Network_role_nutrient_decline.(svg|png)`
+- `output_data/Network_role_all_model_comparisons.csv`  
+- `plots/Species_metric_correlations.(svg|png)`  
+- `plots/Abundance_nutritional_importance.(svg|png)`
 
 ---
 

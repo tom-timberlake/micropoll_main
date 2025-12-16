@@ -1,9 +1,9 @@
 # Reproducible R code for the manuscript entitled:  
-**‘How pollinators support the health and wealth of vulnerable communities’**
+**‘Pollinators support the health and wealth of vulnerable communities’**
 
 **Author:** Thomas P. Timberlake  
-**Last updated:** 17/10/2025  
-**Version:** 3.0
+**Last updated:** 16/12/2025  
+**Version:** 4.0
 
 ---
 

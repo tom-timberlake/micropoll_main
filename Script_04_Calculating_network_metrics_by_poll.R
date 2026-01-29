@@ -3,18 +3,23 @@
 ####################  CROP–POLLINATOR NETWORK ROLES & NUTRITIONAL IMPORTANCE  ###########################
 ##########################################################################################################
 
-# The purpose of this script is to calculate a small set of species-level network metrics
-# (for pollinator taxa in crop–pollinator networks) that represent key network-role
-# dimensions, and test which features of pollinator species (abundance + these metrics)
-# best predict their nutritional importance when removed.
+# This script derives a small set of pollinator (OTU) descriptors that may explain why removing some
+# pollinators causes larger declines in pollinator-dependent nutrient intake than removing others.
 #
-# Final metric set:
-#   - degree            -> partner range / connectedness
-#   - d                 -> specialisation (selectivity)
-#   - species_strength  -> importance of the pollinator to crops
-#
-# This analysis relates to manuscript Question 3.
-
+# Overview of the logic:
+#   1) Build a full plant–pollinator interaction matrix from visit observations.
+#   2) Define pollinator "abundance" as total number of visits recorded for that OTU in the survey.
+#   3) Calculate several species-level network descriptors on the full web:
+#        - specialisation (d′)
+#        - interaction breadth (degree)
+#        - network position (weighted closeness)
+#        - Shannon diversity of interactions across plant partners
+#   4) Many network metrics change mechanically with the number of visits per pollinator (sampling intensity).
+#      To separate "structure beyond activity", each metric is compared to an abundance-constrained null model:
+#      we preserve each pollinator's total number of visits (column sums) but randomise which plants they visit.
+#      Observed values are expressed as z-scores relative to the null expectation.
+#   5) Crop focus is treated similarly, but is defined as the fraction of each pollinator's visits that go to crops.
+#   6) Model nutrient-intake decline using log(response) and log1p(abundance), plus the null-standardised predictors.
 
 rm(list = ls())
 
@@ -26,128 +31,259 @@ library(tidyverse)
 library(readxl)
 library(data.table)
 library(bipartite)
-library(broom)       # for tidy regression output
-library(patchwork)   # for multi-panel plots
-library(scales)      # for axis labels on log scales
-library(corrplot)    # for correlation matrix visualisation
+library(broom)
+library(scales)
+library(corrplot)
+library(vegan)
 
-# Import plant–pollinator interaction data (visit-level observations)
+dir.create("plots", showWarnings = FALSE, recursive = TRUE)
+dir.create("output_data", showWarnings = FALSE, recursive = TRUE)
+
+# Visit-level interaction data
 plant_poll_data <- data.table(
   read_excel("input_data/MP_pollinator_visitation.xlsx",
              sheet = "Visitation data")
 )
 
-# Import results of species-decline modelling (nutritional impacts of removing each pollinator taxon)
+# Nutritional impacts of removing each pollinator OTU
 species_decline_results_population <- read.csv(
   "output_data/OTU_Removal_Results_Population.csv"
 )
 
-#########################################################
-# Filter interactions to crops and calculate abundance ##
-#########################################################
+##############################################################
+# Clean interaction data and build full and crop subsets     #
+##############################################################
 
-# I first restrict to crop–pollinator interactions only, as my goal is to
-# link crop visitation to human nutrition.
-crop_poll_data <- plant_poll_data %>%
+# Retain only records where pollinators have a consistent OTU identity.
+plant_poll_data_clean_all <- plant_poll_data %>%
+  filter(!is.na(insect_species)) %>%
+  select(plant_sci_name, plant_category, insect_OTU)
+
+# Crop-only subset used to quantify how much of each pollinator's activity is allocated to crops.
+plant_poll_data_clean_crop <- plant_poll_data_clean_all %>%
   filter(plant_category == "crop")
 
-# I retain only those interactions where the insect has been identified to species,
-# so that network metrics are comparable and ecologically interpretable.
-plant_poll_data_clean <- crop_poll_data %>%
-  filter(!is.na(insect_species))
+############################################
+# Construct interaction matrices (webs)   ##
+############################################
 
-# I then keep just the plant and pollinator identifiers needed to build the interaction matrix.
-plant_poll_data_simple <- plant_poll_data_clean %>%
-  select(plant_sci_name, insect_OTU)
+# FULL web: all plants (crops + wild) × pollinators
+interaction_matrix_all <- table(
+  plant_poll_data_clean_all$plant_sci_name,
+  plant_poll_data_clean_all$insect_OTU
+)
 
-# I treat the number of crop visits per pollinator OTU as a simple abundance measure.
-abundance_table <- as.data.frame(table(plant_poll_data_simple$insect_OTU))
-colnames(abundance_table) <- c("insect_OTU", "abundance")
-
-# I now build a plant (rows) × pollinator (columns) interaction matrix, which is the
-# basic quantitative web object required by bipartite.
-interaction_matrix <- table(plant_poll_data_simple$plant_sci_name,
-                            plant_poll_data_simple$insect_OTU)
+# CROP web: crops only × pollinators (used only to compute crop visits and crop focus)
+interaction_matrix_crop <- table(
+  plant_poll_data_clean_crop$plant_sci_name,
+  plant_poll_data_clean_crop$insect_OTU
+)
 
 #########################################################
-# Calculate species-level network metrics for insects  ##
+# Calculate abundance (TOTAL visits) and crop focus     #
 #########################################################
 
-# The aim here is to derive a small set of theory-based, species-level metrics that capture
-# complementary aspects of a pollinator's role in the interaction network:
-#   - degree           : number of crop partners (binary connectedness)
-#   - d                : Blüthgen’s specialisation index (selectivity)
-#   - species_strength : importance of the pollinator to partner crops
+# Total abundance = total number of visits recorded per pollinator OTU (across crops + wild plants).
+abund_total <- as.data.frame(table(plant_poll_data_clean_all$insect_OTU))
+colnames(abund_total) <- c("insect_OTU", "abundance")
 
-# I first obtain the full species-level output for pollinators
-# (the "higher" level = columns = pollinators).
-insect_metrics_full <- specieslevel(interaction_matrix, level = "higher")
+# Crop visits are needed to calculate crop_focus (proportion of activity directed to crops).
+abund_crop <- as.data.frame(table(plant_poll_data_clean_crop$insect_OTU))
+colnames(abund_crop) <- c("insect_OTU", "abundance_crop")
 
-# I convert it to a data frame for easier manipulation.
-insect_metrics_df <- as.data.frame(insect_metrics_full)
+# Crop focus = fraction of visits that land on crops.
+abundance_table <- abund_total %>%
+  full_join(abund_crop, by = "insect_OTU") %>%
+  mutate(
+    abundance      = replace_na(abundance, 0),
+    abundance_crop = replace_na(abundance_crop, 0),
+    crop_focus     = ifelse(abundance > 0, abundance_crop / abundance, NA_real_)
+  )
 
-# I add the pollinator OTU identifiers as an explicit column.
-insect_metrics_df$insect_OTU <- rownames(insect_metrics_df)
+#########################################################
+# Calculate observed species-level metrics (full web)   #
+#########################################################
 
-# Different versions of bipartite sometimes use slightly different column names, so
-# I define a small helper function that will look for a set of candidate names and
-# standardise them to a single, consistent name in my workflow.
-pick_col <- function(df, candidates, new_name) {
-  hit <- intersect(candidates, colnames(df))
-  if (length(hit) == 0) {
-    stop("None of the candidate columns found for metric '", new_name,
-         "'. Candidates were: ", paste(candidates, collapse = ", "))
-  }
-  df %>%
-    dplyr::rename(!!new_name := dplyr::all_of(hit[1]))
-}
+# For each pollinator OTU, compute:
+#   - d_all:     specialisation (Blüthgen's d′) from bipartite
+#   - degree_all: number of plant partners (unweighted breadth) from bipartite
+#   - closeness_all: weighted closeness centrality from bipartite
+#   - diversity_all: Shannon diversity of interactions across plant partners (from counts)
+#
+# Shannon diversity is computed using vegan::diversity on the interaction counts because
+# the 'diversity' index is not available in some bipartite versions.
 
-# I now extract and standardise the three key metrics of interest:
-#   - degree            (partner range)
-#   - d                 (specialisation)
-#   - species_strength  (importance / dependence)
-insect_metrics_key <- insect_metrics_df %>%
-  pick_col(c("degree", "Degree"), "degree") %>%
-  pick_col(c("d"),                "d") %>%
-  pick_col(c("species.strength",
-             "species strength",
-             "strength"),
-           "species_strength")
+mat_all <- as.matrix(interaction_matrix_all)
 
-# I now merge these network-role metrics with the abundance information for each pollinator OTU.
-insect_metrics_merged <- insect_metrics_key %>%
+diversity_all_vec <- vegan::diversity(t(mat_all), index = "shannon")
+
+insect_metrics_all_df <- as.data.frame(
+  specieslevel(
+    interaction_matrix_all,
+    level = "higher",
+    index = c("d", "degree", "closeness")
+  )
+)
+insect_metrics_all_df$insect_OTU <- rownames(insect_metrics_all_df)
+
+metrics_all_obs <- insect_metrics_all_df %>%
+  transmute(
+    insect_OTU,
+    d_all          = d,
+    degree_all     = degree,
+    closeness_all  = weighted.closeness,
+    diversity_all  = diversity_all_vec[insect_OTU]
+  )
+
+# Combine observed metrics with abundance and crop focus
+insect_predictors <- metrics_all_obs %>%
   left_join(abundance_table, by = "insect_OTU")
 
 #########################################################
-# Merge network roles with nutritional impact results  ##
+# Null models (full web) and null-standardised metrics  #
 #########################################################
 
-# I rename the OTU column in the decline results to ensure consistency with the
-# interaction/network data.
+# Many metrics increase or decrease simply because an OTU has more total visits.
+# The null model keeps each OTU's total number of visits fixed (column sums) but randomises
+# which plant species receive those visits. Observed values are then expressed as z-scores
+# relative to this null expectation.
+
+# Identify which plant rows correspond to crops in the full matrix (for crop_focus under the null).
+crop_plants <- unique(plant_poll_data_clean_crop$plant_sci_name)
+crop_rows <- rownames(mat_all) %in% crop_plants
+
+set.seed(1)
+Nnull <- 999
+
+# Null model with fixed column totals (pollinator totals), randomised allocation among plant rows.
+nm <- vegan::nullmodel(mat_all, method = "c0_ind")
+
+otus <- colnames(mat_all)
+
+# Storage for null distributions
+null_crop_focus_mat <- matrix(NA_real_, nrow = length(otus), ncol = Nnull,
+                              dimnames = list(otus, paste0("sim_", seq_len(Nnull))))
+null_d_mat <- matrix(NA_real_, nrow = length(otus), ncol = Nnull,
+                     dimnames = list(otus, paste0("sim_", seq_len(Nnull))))
+null_degree_mat <- matrix(NA_real_, nrow = length(otus), ncol = Nnull,
+                          dimnames = list(otus, paste0("sim_", seq_len(Nnull))))
+null_close_mat <- matrix(NA_real_, nrow = length(otus), ncol = Nnull,
+                         dimnames = list(otus, paste0("sim_", seq_len(Nnull))))
+null_diversity_mat <- matrix(NA_real_, nrow = length(otus), ncol = Nnull,
+                             dimnames = list(otus, paste0("sim_", seq_len(Nnull))))
+
+pb <- txtProgressBar(min = 0, max = Nnull, style = 3)
+
+for (i in seq_len(Nnull)) {
+  
+  # vegan::simulate() returns a 3D array even for nsim = 1, so extract the first slice.
+  mat_null <- simulate(nm, nsim = 1)
+  mat_null <- mat_null[, , 1]
+  
+  # (A) Crop focus under the null: fraction of each OTU's null visits that go to crop rows.
+  col_tot  <- colSums(mat_null)
+  crop_tot <- colSums(mat_null[crop_rows, , drop = FALSE])
+  null_crop_focus_mat[, i] <- ifelse(col_tot > 0, crop_tot / col_tot, NA_real_)
+  
+  # (B) Network metrics under the null using the same definitions as the observed metrics.
+  null_df <- as.data.frame(
+    specieslevel(mat_null, level = "higher", index = c("d", "degree", "closeness"))
+  )
+  null_df$insect_OTU <- rownames(null_df)
+  
+  null_d_mat[null_df$insect_OTU, i]      <- null_df$d
+  null_degree_mat[null_df$insect_OTU, i] <- null_df$degree
+  null_close_mat[null_df$insect_OTU, i]  <- null_df$weighted.closeness
+  
+  # (C) Shannon diversity under the null from interaction counts.
+  null_diversity_mat[, i] <- vegan::diversity(t(mat_null), index = "shannon")
+  
+  setTxtProgressBar(pb, i)
+}
+
+close(pb)
+
+# Null means and SDs
+null_mean_crop_focus <- rowMeans(null_crop_focus_mat, na.rm = TRUE)
+null_sd_crop_focus   <- apply(null_crop_focus_mat, 1, sd, na.rm = TRUE)
+
+null_mean_d_all <- rowMeans(null_d_mat, na.rm = TRUE)
+null_sd_d_all   <- apply(null_d_mat, 1, sd, na.rm = TRUE)
+
+null_mean_degree_all <- rowMeans(null_degree_mat, na.rm = TRUE)
+null_sd_degree_all   <- apply(null_degree_mat, 1, sd, na.rm = TRUE)
+
+null_mean_close_all <- rowMeans(null_close_mat, na.rm = TRUE)
+null_sd_close_all   <- apply(null_close_mat, 1, sd, na.rm = TRUE)
+
+null_mean_div_all <- rowMeans(null_diversity_mat, na.rm = TRUE)
+null_sd_div_all   <- apply(null_diversity_mat, 1, sd, na.rm = TRUE)
+
+# Attach null summaries and compute z-scores
+insect_predictors <- insect_predictors %>%
+  mutate(
+    null_mean_crop_focus = null_mean_crop_focus[insect_OTU],
+    null_sd_crop_focus   = null_sd_crop_focus[insect_OTU],
+    z_crop_focus = ifelse(
+      !is.na(crop_focus) & !is.na(null_sd_crop_focus) & null_sd_crop_focus > 0,
+      (crop_focus - null_mean_crop_focus) / null_sd_crop_focus,
+      NA_real_
+    ),
+    
+    null_mean_d_all = null_mean_d_all[insect_OTU],
+    null_sd_d_all   = null_sd_d_all[insect_OTU],
+    z_d_all = ifelse(
+      !is.na(d_all) & !is.na(null_sd_d_all) & null_sd_d_all > 0,
+      (d_all - null_mean_d_all) / null_sd_d_all,
+      NA_real_
+    ),
+    
+    null_mean_degree_all = null_mean_degree_all[insect_OTU],
+    null_sd_degree_all   = null_sd_degree_all[insect_OTU],
+    z_degree_all = ifelse(
+      !is.na(degree_all) & !is.na(null_sd_degree_all) & null_sd_degree_all > 0,
+      (degree_all - null_mean_degree_all) / null_sd_degree_all,
+      NA_real_
+    ),
+    
+    null_mean_closeness_all = null_mean_close_all[insect_OTU],
+    null_sd_closeness_all   = null_sd_close_all[insect_OTU],
+    z_closeness_all = ifelse(
+      !is.na(closeness_all) & !is.na(null_sd_closeness_all) & null_sd_closeness_all > 0,
+      (closeness_all - null_mean_closeness_all) / null_sd_closeness_all,
+      NA_real_
+    ),
+    
+    null_mean_diversity_all = null_mean_div_all[insect_OTU],
+    null_sd_diversity_all   = null_sd_div_all[insect_OTU],
+    z_diversity_all = ifelse(
+      !is.na(diversity_all) & !is.na(null_sd_diversity_all) & null_sd_diversity_all > 0,
+      (diversity_all - null_mean_diversity_all) / null_sd_diversity_all,
+      NA_real_
+    )
+  )
+
+#########################################################
+# Merge predictors with nutritional impact results      #
+#########################################################
+
 species_decline_results_population_filter <- species_decline_results_population %>%
   rename(insect_OTU = removed_OTU)
 
-# I then attach the network-role metrics and abundance to the nutritional impact
-# results for each pollinator species.
-species_decline_network_role <- insect_metrics_merged %>%
-  left_join(species_decline_results_population_filter, by = "insect_OTU")
-
-# I remove "Other" as this is not a meaningful OTU for species-level network metrics.
-species_decline_network_role <- species_decline_network_role %>%
+species_decline_network <- insect_predictors %>%
+  left_join(species_decline_results_population_filter, by = "insect_OTU") %>%
   filter(insect_OTU != "Other")
 
-# For this analysis I restrict attention to nutrients that are meaningfully
-# pollinator-dependent, dropping the others here.
-species_decline_network_role_subset <- species_decline_network_role %>%
+# Drop nutrients we are not using in the pooled response
+species_decline_network <- species_decline_network %>%
   select(
     -propdecl_pollen_mean,
     -propdecl_VitB12_mean, -propdecl_Energy_mean, -propdecl_Fat_mean, -propdecl_Protein_mean,
     -propdecl_VitB1_mean, -propdecl_VitB2_mean, -propdecl_VitB3_mean, -propdecl_VitB6_mean
   )
 
-# I summarise the overall nutritional importance of each pollinator as the sum of
-# proportional declines in intake across six key pollinator-dependent nutrients.
-species_decline_network_role_subset <- species_decline_network_role_subset %>%
+# Pooled nutritional importance (sum across six pollinator-dependent nutrients)
+species_decline_network <- species_decline_network %>%
   mutate(
     mean_intake_decline =
       propdecl_Calcium_mean +
@@ -158,123 +294,73 @@ species_decline_network_role_subset <- species_decline_network_role_subset %>%
       propdecl_VitE_mean
   )
 
-# Optionally, I also keep a long-format version of nutrient-specific declines, which
-# may be useful in other analyses (not used directly in the regression models below).
-species_long <- species_decline_network_role_subset %>%
-  pivot_longer(
-    cols = starts_with("propdecl_"),
-    names_to = "nutrient",
-    values_to = "value"
-  ) %>%
-  mutate(
-    nutrient = nutrient %>%
-      str_remove("^propdecl_") %>%
-      str_remove("_mean$")
-  )
-
 ###############################################################
-# Prepare data for analysis: filter and transform variables  ##
+# Prepare modelling dataset                                  #
 ###############################################################
 
-# I retain only those pollinator species that have a non-zero, non-missing
-# overall nutritional impact.
-species_decline_network_role_filtered <- species_decline_network_role_subset %>%
+df_model <- species_decline_network %>%
   filter(!is.na(mean_intake_decline),
          mean_intake_decline > 0)
 
-# I log-transform both the response (nutritional impact) and abundance to
-# stabilise variance and reduce skew.
-species_decline_network_role_filtered <- species_decline_network_role_filtered %>%
+# Transformations:
+# - log(response) stabilises variance and is safe because mean_intake_decline > 0
+# - log1p(abundance) accommodates zeros and reduces skew
+# - all network predictors are already on a comparable scale as null-referenced z-scores
+df_model <- df_model %>%
   mutate(
     log_mean_intake_decline = log(mean_intake_decline),
-    log_abundance           = log1p(abundance)  # log(1 + abundance) safely handles zeros
+    log_abundance           = log1p(abundance)
   )
 
 ###############################################################
-# Define the key network-role metrics to be tested           ##
+# Final predictor set                                         #
 ###############################################################
 
-# Here I define the core network-role metrics to be tested. These were chosen
-# a priori to represent distinct, theory-based dimensions of species role:
-#   1) degree           -> partner range / connectedness
-#   2) d                -> specialisation (selectivity)
-#   3) species_strength -> importance (plant dependence on this pollinator)
-metrics_key <- c("degree",
-                 "d",
-                 "species_strength")
+# Candidate predictors (all null-standardised):
+#   - z_d_all          : specialisation beyond null expectation
+#   - z_crop_focus     : crop allocation beyond null expectation
+#   - z_degree_all     : breadth beyond null expectation
+#   - z_closeness_all  : centrality beyond null expectation
+#   - z_diversity_all  : Shannon diversity beyond null expectation
+candidate_predictors <- c(
+  "z_d_all",
+  "z_crop_focus",
+  "z_degree_all",
+  "z_closeness_all",
+  "z_diversity_all"
+)
 
-# As a basic safeguard, I check that all of these metrics are present.
-missing_metrics <- setdiff(metrics_key,
-                           colnames(species_decline_network_role_filtered))
-if (length(missing_metrics) > 0) {
-  stop("The following metrics are missing from the data: ",
-       paste(missing_metrics, collapse = ", "))
+missing_predictors <- setdiff(candidate_predictors, colnames(df_model))
+if (length(missing_predictors) > 0) {
+  stop("Missing predictors in df_model: ", paste(missing_predictors, collapse = ", "))
 }
 
-# I now construct a modelling data frame with the response, abundance, and
-# the three key network-role metrics.
-df_log <- species_decline_network_role_filtered %>%
+df_log <- df_model %>%
   select(
     insect_OTU,
     mean_intake_decline,
     log_mean_intake_decline,
     abundance,
     log_abundance,
-    all_of(metrics_key)
-  )
-
-# I log-transform the network metrics (using log1p to handle zeros and
-# reduce the influence of extreme values).
-df_log <- df_log %>%
-  mutate(
-    across(
-      all_of(metrics_key),
-      ~ log1p(.),
-      .names = "log_{.col}"
-    )
-  )
-
-# I store the names of the log-transformed metrics for later use in models.
-log_metrics <- paste0("log_", metrics_key)
-
-# I now drop any rows with missing values in the response, abundance, or
-# any of the log-transformed metrics to ensure complete-case analysis.
-df_log <- df_log %>%
+    all_of(candidate_predictors)
+  ) %>%
   filter(
     complete.cases(
-      select(., log_mean_intake_decline,
-             log_abundance,
-             all_of(log_metrics))
+      select(., log_mean_intake_decline, log_abundance, all_of(candidate_predictors))
     )
   )
 
 #############################################
-# Inspect correlation among key predictors ##
+# Inspect correlation among predictors      #
 #############################################
 
-# Before fitting models, I check how strongly the chosen predictors are
-# correlated with one another and with abundance, to assess redundancy.
-
-# I assemble a data frame containing log-abundance and all log metrics.
 cor_vars <- df_log %>%
-  select(log_abundance, all_of(log_metrics))
+  select(log_mean_intake_decline, log_abundance, all_of(candidate_predictors))
 
-# I compute the correlation matrix.
 cor_matrix <- cor(cor_vars, use = "complete.obs")
-
-# I print the correlations to the console.
 print(cor_matrix)
 
-# I also visualise the correlation matrix using corrplot to identify
-# any strong collinearities at a glance.
-corr_plot_metrics <- corrplot(cor_matrix,
-                              method = "ellipse",
-                              type   = "upper",
-                              tl.cex = 0.8)
-         
-
-# Save PNG
-png("plots/Species_metric_correlations.png",
+png("plots/Species_metric_correlations_abun_all.png",
     width = 7, height = 7, units = "in", res = 600)
 corrplot(cor_matrix,
          method = "ellipse",
@@ -282,41 +368,37 @@ corrplot(cor_matrix,
          tl.cex = 0.8)
 dev.off()
 
-# Save SVG
-svg("plots/Species_metric_correlations.svg",
+svg("plots/Species_metric_correlations_abun_all.svg",
     width = 7, height = 7)
 corrplot(cor_matrix,
          method = "ellipse",
          type   = "upper",
          tl.cex = 0.8)
 dev.off()
-  
-  
 
 ######################################################
-# Regression models: abundance + key network metrics ##
+# Regression models: abundance + candidate predictors #
 ######################################################
 
-# I begin with a simple baseline model in which nutritional impact is
-# predicted by abundance alone.
+# Baseline model: nutritional importance explained by total abundance alone.
 M0 <- lm(log_mean_intake_decline ~ log_abundance, data = df_log)
 AIC_M0   <- AIC(M0)
 adjR2_M0 <- summary(M0)$adj.r.squared
 summary(M0)
 
-# I then test each network-role metric individually, always in addition
-# to abundance (i.e. abundance + single metric). This allows me to ask
-# whether each metric explains additional variance beyond abundance alone.
-metric_results <- lapply(log_metrics, function(met) {
-  form <- as.formula(paste("log_mean_intake_decline ~ log_abundance +", met))
+# One-at-a-time models: abundance + one additional predictor
+metric_results <- lapply(candidate_predictors, function(pred) {
+  
+  form <- as.formula(paste("log_mean_intake_decline ~ log_abundance +", pred))
   mod  <- lm(form, data = df_log)
   tid  <- tidy(mod)
-  slope_metric <- tid[tid$term == met, ]
+  
+  slope_pred <- tid[tid$term == pred, ]
   
   data.frame(
-    metric                 = met,
-    coef_metric            = slope_metric$estimate,
-    p_metric               = slope_metric$p.value,
+    predictor              = pred,
+    coef_predictor         = slope_pred$estimate,
+    p_predictor            = slope_pred$p.value,
     adjR2_model            = summary(mod)$adj.r.squared,
     AIC_model              = AIC(mod),
     delta_AIC_vs_abundance = AIC(mod) - AIC_M0,
@@ -329,86 +411,63 @@ metric_results_df <- bind_rows(metric_results) %>%
 
 metric_results_df
 
-
-# I also fit a full model that includes abundance plus all
-# chosen network-role metrics simultaneously.
+# Full model: abundance + all selected predictors
 form_all <- as.formula(paste(
   "log_mean_intake_decline ~ log_abundance +",
-  paste(log_metrics, collapse = " + ")
+  paste(candidate_predictors, collapse = " + ")
 ))
 
 M_all <- lm(form_all, data = df_log)
 summary(M_all)
-AIC_M_all <- AIC(M_all)
 
-# I summarise the comparison between the abundance-only model and the
-# full model in terms of AIC and adjusted R².
-full_model_comparison <- data.frame(
-  model = c("abundance_only", "abundance_plus_all_metrics"),
-  AIC   = c(AIC_M0, AIC_M_all),
-  adjR2 = c(adjR2_M0, summary(M_all)$adj.r.squared)
-)
-
-full_model_comparison
-
+AIC_M_all   <- AIC(M_all)
+adjR2_M_all <- summary(M_all)$adj.r.squared
 
 ############################################################
-# Combine all model performances into a single comparison ##
+# Combine model performances into a single comparison table #
 ############################################################
 
-# I now collate the performance of:
-#   - the abundance-only baseline,
-#   - each abundance + single-metric model,
-#   - and the abundance + all-metrics model
-# into a single comparison table.
-
-# 1. Baseline row: abundance-only model
 baseline_row <- data.frame(
   model                   = "abundance_only",
   model_type              = "baseline",
-  metric                  = NA_character_,
-  n_predictors            = 1,  # just log_abundance
+  predictor               = NA_character_,
+  n_predictors            = 1,
   AIC                     = AIC_M0,
   adjR2                   = adjR2_M0,
   delta_AIC_vs_abundance  = 0,
   adjR2_gain              = 0,
-  coef_metric             = NA_real_,
-  p_metric                = NA_real_
+  coef_predictor          = NA_real_,
+  p_predictor             = NA_real_
 )
 
-# 2. Rows for models with abundance + each single metric
 individual_rows <- metric_results_df %>%
   mutate(
-    model        = paste0("abundance_plus_", metric),
-    model_type   = "abundance + single_metric",
-    n_predictors = 2,  # log_abundance + 1 network metric
+    model        = paste0("abundance_plus_", predictor),
+    model_type   = "abundance + single_predictor",
+    n_predictors = 2,
     AIC          = AIC_model,
     adjR2        = adjR2_model
   ) %>%
   select(
-    model, model_type, metric, n_predictors,
+    model, model_type, predictor, n_predictors,
     AIC, adjR2,
     delta_AIC_vs_abundance, adjR2_gain,
-    coef_metric, p_metric
+    coef_predictor, p_predictor
   )
 
-# 3. Row for the model with abundance + all metrics together
-adjR2_M_all <- summary(M_all)$adj.r.squared
-
 full_row <- data.frame(
-  model                   = "abundance_plus_all_metrics",
-  model_type              = "abundance + all_metrics",
-  metric                  = "all",
-  n_predictors            = 1 + length(log_metrics),  # abundance + all metrics
+  model                   = "abundance_plus_all_predictors",
+  model_type              = "abundance + all_predictors",
+  predictor               = "all",
+  n_predictors            = 1 + length(candidate_predictors),
   AIC                     = AIC_M_all,
   adjR2                   = adjR2_M_all,
   delta_AIC_vs_abundance  = AIC_M_all - AIC_M0,
   adjR2_gain              = adjR2_M_all - adjR2_M0,
-  coef_metric             = NA_real_,
-  p_metric                = NA_real_
+  coef_predictor          = NA_real_,
+  p_predictor             = NA_real_
 )
 
-# 4. Bind everything into one table and order by AIC (best model first)
 model_comparison_table <- bind_rows(
   baseline_row,
   individual_rows,
@@ -416,29 +475,20 @@ model_comparison_table <- bind_rows(
 ) %>%
   arrange(AIC)
 
-# I inspect this combined model comparison in the console and save it.
 model_comparison_table
 
 write.csv(
   model_comparison_table,
-  "output_data/Network_role_all_model_comparisons.csv",
+  "output_data/Network_role_all_model_comparisons_abun_all.csv",
   row.names = FALSE
 )
 
 ##########################################
-# Plot abundance vs nutritional impacts ##
+# Plot abundance vs nutritional impacts  #
 ##########################################
 
-# Because the results show that abundance is the only variable that predicts
-# nutritional importance, and none of the network metrics add explanatory power,
-# we produce ONLY a single diagnostic plot:
-#     abundance → nutritional importance
-#
-# All partial-effect plots for network metrics have been removed because
-# no metrics significantly improved model fit beyond abundance.
-
 p_abundance <- ggplot(df_log,
-                      aes(x = abundance,
+                      aes(x = abundance,  
                           y = mean_intake_decline)) +
   geom_point(alpha = 0.7) +
   geom_smooth(method = "lm",
@@ -447,13 +497,12 @@ p_abundance <- ggplot(df_log,
   scale_x_log10(labels = label_number(accuracy = 1)) +
   scale_y_log10(labels = label_number(accuracy = 0.001)) +
   labs(
-    x = "Pollinator abundance (log scale)",
-    y = "Proportional decline in nutrient intake (log scale)",
+    x = "Pollinator abundance (log10 scale)",
+    y = "Proportional decline in nutrient intake (log10 scale)",
     title = ""
   ) +
   theme_bw()
 
-# Save the abundance-only plot
 ggsave(
   plot     = p_abundance,
   filename = "plots/Abundance_nutritional_importance.png",
@@ -471,3 +520,8 @@ ggsave(
   dpi      = 600,
   bg       = "white"
 )
+
+##########################################################################################################
+# End of script
+##########################################################################################################
+

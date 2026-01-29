@@ -1,9 +1,9 @@
 # Reproducible R code for the manuscript entitled:  
-**‘Pollinators support the health and wealth of vulnerable communities’**
+**‘Pollinators support the nutritional health and economic status of vulnerable communities’**
 
 **Author:** Thomas P. Timberlake  
-**Last updated:** 16/12/2025  
-**Version:** 4.0
+**Last updated:** 29/01/2026  
+**Version:** 5.0
 
 ---
 
@@ -38,7 +38,8 @@ The scripts use a variety of packages for data import, manipulation, visualizati
 - **bipartite:** Pollination network analyses and species-level metrics  
 - **lme4, emmeans:** Mixed-effects modelling and post hoc comparisons  
 - **car, robustbase, broom:** Model diagnostics, robust regressions, tidy outputs  
-- **scales, viridis:** Improved scaling and colour palettes  
+- **scales, viridis:** Improved scaling and colour palettes
+- **bipartite, vegan:** Construction and analysis of quantitative plant–pollinator networks, including calculation of species-level network metrics and abundance-constrained null model simulations used to standardise metrics and quantify interaction structure beyond sampling effects.
 
 ---
 
@@ -150,18 +151,33 @@ Scenario-specific datasets, nutrient and income change summaries, and plots.
 Quantify key species-level crop–pollinator network roles and pollinator abundance, and assess their ability to predict nutritional importance.
 
 **Key Steps:**  
-- Import crop–pollinator visitation data and species-removal (nutritional decline) results (Script 3A).  
-- Filter interactions to crop species and identified pollinator OTUs, and construct a quantitative crop × pollinator interaction matrix.  
-- Calculate species-level network metrics for pollinators (degree, Blüthgen’s *d* specialisation, species strength) using the **bipartite** package.  
-- Merge network metrics with pollinator abundance and nutritional impact estimates for each pollinator OTU.  
-- Summarise nutritional importance as the combined proportional intake decline across six pollinator-dependent nutrients.  
-- Fit linear models (abundance-only, abundance plus individual metrics, abundance plus all metrics) and rank models by AIC.  
-- Export model comparison tables and generate correlation and diagnostic plots.
+- Import plant–pollinator visitation data and pollinator species-removal results generated in Script 3A.
+- Construct a quantitative plant × pollinator interaction matrix including both crop and wild plant species.
+- Calculate observed species-level network metrics for each pollinator OTU using the bipartite package, including:
+   1. Blüthgen’s d′ specialisation,
+   2. Interaction breadth (degree),
+   3. Weighted closeness centrality,
+   4. Shannon diversity of interactions across plant partners.
+- Quantify pollinator abundance as total recorded visit frequency and calculate v. crop focus as the proportion of visits directed to crop species.
+- Generate abundance-constrained null models using the vegan package (nullmodel, method = c0_ind) to randomise plant associations while preserving total visits per pollinator.
+- Convert observed network metrics and crop focus to Z-scores relative to null model expectations, isolating interaction structure beyond sampling intensity.
+- Summarise nutritional importance for each pollinator as the combined proportional intake decline across six pollinator-dependent nutrients (Calcium, Iron, Vitamin A, Vitamin C, Vitamin E, and Folate).
+- Prepare a modelling dataset by log-transforming nutritional importance and pollinator abundance and retaining null-standardised predictors.
+- Assess collinearity among predictors using correlation matrices.
+- Fit linear models predicting nutritional importance using:
+   > abundance alone,
+   > abundance plus individual network metrics,
+   > abundance plus all network metrics combined.
+- Compare models using AIC and adjusted R² to evaluate whether network structure improves prediction beyond abundance alone.
+- Export model comparison tables and produce visualisations of predictor correlations and abundance–nutritional importance relationships.
+
+
 
 **Outputs:**  
-- `output_data/Network_role_all_model_comparisons.csv`  
-- `plots/Species_metric_correlations.(svg|png)`  
-- `plots/Abundance_nutritional_importance.(svg|png)`
+- output_data/Network_role_all_model_comparisons_abun_all.csv – model comparison table summarising abundance-only, single-metric, and full models.
+- plots/Species_metric_correlations_abun_all.(png|svg) – correlation matrix of abundance, nutritional importance, and null-standardised network metrics.
+- plots/Abundance_nutritional_importance.(png|svg) – relationship between pollinator abundance and nutritional importance.
+
 
 ---
 

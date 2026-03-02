@@ -1,9 +1,10 @@
 # Reproducible R code for the manuscript entitled:  
-**‘Pollinators support the nutritional health and economic status of vulnerable communities’**
+**‘Pollinators support the nutrition and income of vulnerable communities’**
 
-**Author:** Thomas P. Timberlake  
-**Last updated:** 29/01/2026  
-**Version:** 5.0
+**Author:** Thomas P. Timberlake
+**Manuscript accepted:** 23/02/2026
+**Last updated:** 02/03/2026  
+**Version:** 6.0
 
 ---
 

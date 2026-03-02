@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+title: "Reproducible R code for: Pollinators support the nutrition and income of vulnerable communities"
+authors:
+  - family-names: Timberlake
+    given-names: Thomas P.
+version: 6.0
+date-released: 2026-03-02
+doi: 10.5281/zenodo.XXXXX
+type: software
